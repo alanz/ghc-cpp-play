@@ -125,7 +125,9 @@ happyNewToken action sts stk =
     lexer
         True
         ( \tk ->
-            let cont i = happyDoAction i tk action sts stk
+            let cont i =
+                    trace ("happyNewToken:tk=" ++ show tk) $
+                    happyDoAction i tk action sts stk
              in case tk of
                     ITeof -> happyDoAction 169 tk action sts stk
                     ITa -> cont 1
