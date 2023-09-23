@@ -32,7 +32,7 @@ initParserState :: PState
 initParserState =
     PState
         { errors = []
-        , feed = [ITa, ITb, ITeof]
+        , feed = [ITa, ITppIf, ITa, ITppEnd, ITb, ITeof]
         , output = []
         }
 
@@ -91,6 +91,9 @@ data PState = PState
 data Token
     = ITa
     | ITb
+    | ITppIf
+    | ITppEnd
+    | ITppIgnored [Token]
     | ITeof
     deriving (Show)
 
@@ -153,6 +156,9 @@ happyNewToken action sts stk =
                     ITeof -> happyDoAction 169 tk action sts stk
                     ITa -> cont 1
                     ITb -> cont 2
+                    ITppIf -> cont 3
+                    ITppEnd -> cont 4
+                    ITppIgnored _ -> cont 5
                     -- _ -> happyError' (tk, [])
         )
 
@@ -162,6 +168,8 @@ happyDoAction num tk action sts stk =
     case num of
         1 -> happyShift 2 num tk action sts stk
         2 -> happyShift 5 num tk action sts stk
+        3 -> happyShift 5 num tk action sts stk
+        4 -> happyShift 5 num tk action sts stk
         5 -> happyAccept num tk action sts stk
         169 -> happyAccept num tk action sts stk
         i -> happyFail ["failing:" ++ show i] i tk action sts stk
