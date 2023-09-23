@@ -13,6 +13,7 @@ module Main where
 
 import Control.Monad
 import Debug.Trace (trace)
+import GHC.Generics (prec)
 
 -- ---------------------------------------------------------------------
 main :: IO ()
@@ -34,8 +35,52 @@ initParserState =
         { errors = []
         , feed = [ITa, ITppIf, ITa, ITppEnd, ITb, ITeof]
         , output = []
+        , pp = initPpState
         }
 
+-- =====================================================================
+-- Preprocessor layer.
+-- Implement as a monad transformer stack, adding state.
+-- Or there is already ParserState, maybe just leverage that.
+
+-- Requirements
+-- - Consume the tokens from `parseModuleNoHaddock`
+-- - Process them for preprocessor directives, swallowing them until done
+-- - Emit the stream as normal tokens, with unused and other PP
+--   directives wraped in ITppIgnored
+
+data PpState = PpState
+    { defines :: ![String]
+    }
+    deriving (Show)
+
+initPpState :: PpState
+initPpState = PpState{defines = []}
+
+ppLexer, ppLexerDbg :: Bool -> (Token -> P a) -> P a
+-- Use this instead of 'lexer' in GHC.Parser to dump the tokens for debugging.
+ppLexerDbg queueComments cont = ppLexer queueComments contDbg
+  where
+    contDbg tok = trace ("ptoken: " ++ show tok) (cont tok)
+
+ppLexer _queueComments cont = do
+    tok <- lexToken
+    tok' <- case tok of
+        ITppIf -> preprocessIf
+        _ -> return tok
+    cont tok'
+
+-- Swallow tokens until ITppEnd
+preprocessIf :: P Token
+preprocessIf = go [ITppIf]
+  where
+    go acc = do
+      tok <- lexToken
+      case tok of
+        ITppEnd -> return $ ITppIgnored (reverse $ ITppEnd:acc)
+        _ -> go (tok:acc)
+
+-- =====================================================================
 -- ---------------------------------------------------------------------
 -- =====================================================================
 -- Lexer.x
@@ -82,9 +127,10 @@ pattern PFailed s = PR (# | s #)
 -- ---------------------------------------------------------------------
 
 data PState = PState
-    { feed :: [Token]
-    , errors :: [String]
-    , output :: [Token]
+    { feed :: ![Token]
+    , errors :: ![String]
+    , output :: ![Token]
+    , pp :: !PpState
     }
     deriving (Show)
 
@@ -146,12 +192,13 @@ happyParse start_state = happyNewToken start_state notHappyAtAll notHappyAtAll
 
 happyNewToken :: p1 -> p2 -> p3 -> P Token
 happyNewToken action sts stk =
-    lexer
+    -- lexer
+    ppLexerDbg
         True
         ( \tk ->
             let cont i =
-                    trace ("happyNewToken:tk=" ++ show tk) $
-                    happyDoAction i tk action sts stk
+                    trace ("happyNewToken:tk=" ++ show tk)
+                        $ happyDoAction i tk action sts stk
              in case tk of
                     ITeof -> happyDoAction 169 tk action sts stk
                     ITa -> cont 1
@@ -170,7 +217,8 @@ happyDoAction num tk action sts stk =
         2 -> happyShift 5 num tk action sts stk
         3 -> happyShift 5 num tk action sts stk
         4 -> happyShift 5 num tk action sts stk
-        5 -> happyAccept num tk action sts stk
+        5 -> happyShift 5 num tk action sts stk
+        50 -> happyAccept num tk action sts stk
         169 -> happyAccept num tk action sts stk
         i -> happyFail ["failing:" ++ show i] i tk action sts stk
 
@@ -191,7 +239,7 @@ happyShift new_state i tk st sts stk = do
     happyNewToken new_state sts stk
 
 stash :: Token -> P ()
-stash tk = P $ \s -> POk (s { output = tk : output s}) ()
+stash tk = P $ \s -> POk (s{output = tk : output s}) ()
 
 happyFail :: [String] -> Int -> Token -> p2 -> p3 -> p4 -> P a
 happyFail explist i tk old_st _ stk =
