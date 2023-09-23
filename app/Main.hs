@@ -19,6 +19,26 @@ main :: IO ()
 main = doParse
 
 -- ---------------------------------------------------------------------
+-- Call the emulated parser (emulating GHC side)
+
+doParse :: IO ()
+doParse =
+    case unP parseModuleNoHaddock initParserState of
+        PFailed pst -> putStrLn $ "PFailed: " ++ show pst
+        POk pst out -> putStrLn $ "POk: " ++ show (pst, out)
+
+-- | Creates a parse state from a 'ParserOpts' value
+initParserState :: PState
+initParserState =
+    PState
+        { errors = []
+        , feed = [ITa, ITb, ITeof]
+        , output = []
+        }
+
+-- ---------------------------------------------------------------------
+-- =====================================================================
+-- Lexer.x
 
 -- | The parsing monad, isomorphic to @StateT PState Maybe@.
 newtype P a = P {unP :: PState -> ParseResult a}
@@ -90,25 +110,26 @@ lexToken =
          in
             POk s' tok
 
+-- Report a parse failure, giving the span of the previous token as
+-- the location of the error.  This is the entry point for errors
+-- detected during parsing.
+srcParseFail :: P a
+srcParseFail = P $ \s@PState{} ->
+    unP (addFatalError "failed") s
+
+addFatalError :: String -> P b
+addFatalError err =
+    addError err >> P PFailed
+
+addError :: String -> P ()
+addError err =
+    P $ \s -> POk s{errors = err : errors s} ()
+
+-- End Lexer.(x|hs)
+-- =====================================================================
 -- ---------------------------------------------------------------------
--- Cal the emulated parser
-
-doParse :: IO ()
-doParse =
-    case unP parseModuleNoHaddock initParserState of
-        PFailed pst -> putStrLn $ "PFailed: " ++ show pst
-        POk pst out -> putStrLn $ "POk: " ++ show (pst, out)
-
--- | Creates a parse state from a 'ParserOpts' value
-initParserState :: PState
-initParserState =
-    PState
-        { errors = []
-        , feed = [ITa, ITb, ITeof]
-        , output = []
-        }
-
--- ---------------------------------------------------------------------
+-- =====================================================================
+-- From Parser.(y|hs)
 -- Emulate the parser
 
 parseModuleNoHaddock :: P Token
@@ -140,7 +161,9 @@ happyDoAction :: Int -> Token -> p2 -> p3 -> p4 -> P Token
 happyDoAction num tk action sts stk =
     case num of
         1 -> happyShift 2 num tk action sts stk
+        2 -> happyShift 5 num tk action sts stk
         5 -> happyAccept num tk action sts stk
+        169 -> happyAccept num tk action sts stk
         i -> happyFail ["failing:" ++ show i] i tk action sts stk
 
 -- happyAccept j tk st sts (HappyStk ans _) =
@@ -164,7 +187,7 @@ stash tk = P $ \s -> POk (s { output = tk : output s}) ()
 
 happyFail :: [String] -> Int -> Token -> p2 -> p3 -> p4 -> P a
 happyFail explist i tk old_st _ stk =
-    trace "failing"
+    trace ("failing" ++ show explist)
         $ happyError_ explist i tk
 
 happyError_ :: [String] -> p -> Token -> P a
@@ -179,19 +202,5 @@ happyError' tk = (\(tokens, explist) -> happyError) tk
 happyError :: P a
 happyError = srcParseFail
 
--- Report a parse failure, giving the span of the previous token as
--- the location of the error.  This is the entry point for errors
--- detected during parsing.
-srcParseFail :: P a
-srcParseFail = P $ \s@PState{} ->
-    unP (addFatalError "failed") s
-
-addFatalError :: String -> P b
-addFatalError err =
-    addError err >> P PFailed
-
-addError :: String -> P ()
-addError err =
-    P $ \s -> POk s{errors = err : errors s} ()
-
+-- =====================================================================
 -- ---------------------------------------------------------------------
