@@ -12,8 +12,9 @@
 module Main where
 
 import Control.Monad
+import Data.Maybe
+import Data.Set qualified as Set
 import Debug.Trace (trace)
-import GHC.Generics (prec)
 
 -- ---------------------------------------------------------------------
 main :: IO ()
@@ -28,12 +29,33 @@ doParse =
         PFailed pst -> putStrLn $ "PFailed: " ++ show pst
         POk pst out -> putStrLn $ "POk: " ++ show (pst, out)
 
--- | Creates a parse state from a 'ParserOpts' value
+-- | Creates a parse state
 initParserState :: PState
 initParserState =
     PState
         { errors = []
-        , feed = [ITa, ITppIf, ITa, ITppEnd, ITb, ITeof]
+        , feed =
+            [ ITa
+            , ITppDefine "FOO"
+            , ITppIfdef "FOO"
+            , ITtrue
+            , ITa
+            , ITppElse
+            , ITb
+            , ITppEnd
+            , ITb
+            , ITeof
+            ]
+        , output = []
+        , pp = initPpState
+        }
+
+-- | Creates a parse state
+initParserStateFeed :: [Token] -> PState
+initParserStateFeed feed =
+    PState
+        { errors = []
+        , feed = feed
         , output = []
         , pp = initPpState
         }
@@ -50,24 +72,37 @@ initParserState =
 --   directives wraped in ITppIgnored
 
 data PpState = PpState
-    { defines :: ![String]
+    { defines :: !(Set.Set String)
+    , pushed_back :: !(Maybe Token)
+    , context :: ![PpContext]
+    , accepting :: !Bool
     }
     deriving (Show)
 
+data PpContext = PpContextIf [Token]
+    deriving (Show)
+
 initPpState :: PpState
-initPpState = PpState{defines = []}
+initPpState = PpState{defines = Set.empty, pushed_back = Nothing, context = [], accepting = True}
 
 ppLexer, ppLexerDbg :: Bool -> (Token -> P a) -> P a
 -- Use this instead of 'lexer' in GHC.Parser to dump the tokens for debugging.
 ppLexerDbg queueComments cont = ppLexer queueComments contDbg
   where
     contDbg tok = trace ("ptoken: " ++ show tok) (cont tok)
-
 ppLexer _queueComments cont = do
-    tok <- lexToken
+    tok <- ppLexToken
     tok' <- case tok of
         ITppIf -> preprocessIf
-        _ -> return tok
+        ITppDefine _ -> preprocessDefine tok
+        ITppIfdef _ -> preprocessIfDef tok
+        ITppElse -> preprocessElse
+        ITppEnd -> preprocessEnd
+        _ -> do
+            accepting <- getAccepting
+            if accepting
+                then return tok
+                else return (ITppIgnored [tok])
     cont tok'
 
 -- Swallow tokens until ITppEnd
@@ -75,10 +110,102 @@ preprocessIf :: P Token
 preprocessIf = go [ITppIf]
   where
     go acc = do
-      tok <- lexToken
-      case tok of
-        ITppEnd -> return $ ITppIgnored (reverse $ ITppEnd:acc)
-        _ -> go (tok:acc)
+        tok <- ppLexToken
+        case tok of
+            ITppEnd -> return $ ITppIgnored (reverse $ ITppEnd : acc)
+            _ -> go (tok : acc)
+
+preprocessDefine :: Token -> P Token
+preprocessDefine tok@(ITppDefine def) = do
+    ppDefine def
+    return (ITppIgnored [tok])
+preprocessDefine tok = return tok
+
+preprocessIfDef :: Token -> P Token
+preprocessIfDef tok@(ITppIfdef def) = do
+    defined <- ppIsDefined def
+    if defined
+        then do
+            pushContext (PpContextIf [tok])
+            setAccepting True
+        else setAccepting False
+    return (ITppIgnored [tok])
+preprocessIfDef tok = return tok
+
+preprocessElse :: P Token
+preprocessElse = do
+    accepting <- getAccepting
+    setAccepting (not accepting)
+    return (ITppIgnored [ITppElse])
+
+preprocessEnd :: P Token
+preprocessEnd = do
+    -- TODO: nested context
+    setAccepting True
+    return (ITppIgnored [ITppEnd])
+
+-- ---------------------------------------------------------------------
+-- Preprocessor state functions
+
+-- context stack start -----------------
+
+pushContext :: PpContext -> P ()
+pushContext new =
+    P $ \s -> POk s{pp = (pp s){context = new : context (pp s)}} ()
+
+setAccepting :: Bool -> P ()
+setAccepting on =
+    P $ \s -> POk s{pp = (pp s){accepting = on}} ()
+
+getAccepting :: P Bool
+getAccepting = P $ \s -> POk s (accepting (pp s))
+
+-- context stack end -------------------
+
+-- pushed_back token start --------------
+
+pushBack :: Token -> P ()
+pushBack tok = P $ \s ->
+    if isJust (pushed_back (pp s))
+        then
+            PFailed
+                $ s
+                    { errors =
+                        ("pushBack: " ++ show tok ++ ", we already have a token:" ++ show (pushed_back (pp s)))
+                            : errors s
+                    }
+        else
+            let
+                ppVal = pp s
+                pp' = ppVal{pushed_back = Just tok}
+                s' = s{pp = pp'}
+             in
+                POk s' ()
+
+-- | Destructive read of the pushed back token (if any)
+getPushBack :: P (Maybe Token)
+getPushBack = P $ \s ->
+    POk s{pp = (pp s){pushed_back = Nothing}} (pushed_back (pp s))
+
+-- | Get next token, which may be the pushed back one
+ppLexToken :: P Token
+ppLexToken = do
+    mtok <- getPushBack
+    maybe lexToken return mtok
+
+-- pushed_back token end ----------------
+
+-- definitions start --------------------
+
+ppDefine :: String -> P ()
+ppDefine def = P $ \s ->
+    POk s{pp = (pp s){defines = Set.insert def (defines (pp s))}} ()
+
+ppIsDefined :: String -> P Bool
+ppIsDefined def = P $ \s ->
+    POk s (Set.member def (defines (pp s)))
+
+-- definitions end ----------------------
 
 -- =====================================================================
 -- ---------------------------------------------------------------------
@@ -137,11 +264,22 @@ data PState = PState
 data Token
     = ITa
     | ITb
-    | ITppIf
+    | ITtrue
+    | ITfalse
+    | -- directives
+      ITppIf
+    | ITppElse
     | ITppEnd
-    | ITppIgnored [Token]
+    | ITppDefine String
+    | ITppUndef String
+    | -- conditionals
+      ITppIfdef String
+    | ITppIfndef String
+    | ITppDefined String
+    | -- Transfer to upper parser
+      ITppIgnored [Token]
     | ITeof
-    deriving (Show)
+    deriving (Show, Eq)
 
 lexer :: Bool -> (Token -> P a) -> P a
 lexer _queueComments cont = do
@@ -206,6 +344,7 @@ happyNewToken action sts stk =
                     ITppIf -> cont 3
                     ITppEnd -> cont 4
                     ITppIgnored _ -> cont 5
+                    _ -> cont 5
                     -- _ -> happyError' (tk, [])
         )
 
@@ -226,7 +365,7 @@ happyDoAction num tk action sts stk =
 --         (happyTcHack j (happyTcHack st)) (happyReturn1 ans)
 
 happyAccept :: Int -> Token -> p2 -> p3 -> p4 -> P Token
-happyAccept j tk st sts _ =
+happyAccept _j tk _st _sts _ =
     trace ("happyAccept:" ++ show tk)
         $ return tk
 
@@ -234,7 +373,7 @@ happyAccept j tk st sts _ =
 -- happyReturn1 = return
 
 happyShift :: Int -> Int -> Token -> p2 -> p3 -> p4 -> P Token
-happyShift new_state i tk st sts stk = do
+happyShift new_state _i tk _st sts stk = do
     stash tk
     happyNewToken new_state sts stk
 
@@ -242,7 +381,7 @@ stash :: Token -> P ()
 stash tk = P $ \s -> POk (s{output = tk : output s}) ()
 
 happyFail :: [String] -> Int -> Token -> p2 -> p3 -> p4 -> P a
-happyFail explist i tk old_st _ stk =
+happyFail explist i tk _old_st _ _stk =
     trace ("failing" ++ show explist)
         $ happyError_ explist i tk
 
@@ -253,10 +392,78 @@ notHappyAtAll :: a
 notHappyAtAll = Prelude.error "Internal Happy error\n"
 
 happyError' :: (Token, [String]) -> P a
-happyError' tk = (\(tokens, explist) -> happyError) tk
+happyError' tk = (\(_tokens, _explist) -> happyError) tk
 
 happyError :: P a
 happyError = srcParseFail
 
 -- =====================================================================
 -- ---------------------------------------------------------------------
+
+-- Testing
+
+testWithFeed :: [Token] -> IO [Token]
+testWithFeed feed =
+    case unP parseModuleNoHaddock (initParserStateFeed feed) of
+        PFailed pst -> error $ "PFailed: " ++ show pst
+        -- POk pst out -> putStrLn $ "POk: " ++ show (pst, out)
+        POk pst _out -> return (reverse $ output pst)
+
+t1 :: IO ()
+t1 = do
+    res <-
+        testWithFeed
+            [ ITa
+            , ITppDefine "FOO"
+            , ITppIfdef "FOO"
+            , ITa
+            , ITppElse
+            , ITb
+            , ITppEnd
+            , ITb
+            , ITeof
+            ]
+    putStrLn $ "res=" ++ show res
+    let expected =
+            [ ITa
+            , ITppIgnored [ITppDefine "FOO"]
+            , ITppIgnored [ITppIfdef "FOO"]
+            , ITa
+            , ITppIgnored [ITppElse]
+            , ITppIgnored [ITb]
+            , ITppIgnored [ITppEnd]
+            , ITb
+            ]
+    if res == expected
+        then return ()
+        else error $ "mismatch: expected\n " ++ show expected ++ "\ngot\n " ++ show res
+
+t2 :: IO ()
+t2 = do
+    res <-
+        testWithFeed
+            [ ITa
+            , ITppDefine "FOO"
+            , ITppIfdef "BAR"
+            , ITa
+            , ITppElse
+            , ITb
+            , ITppEnd
+            , ITb
+            , ITeof
+            ]
+    putStrLn $ "res=" ++ show res
+    let expected =
+            [ ITa
+            , ITppIgnored [ITppDefine "FOO"]
+            , ITppIgnored [ITppIfdef "BAR"]
+            , ITppIgnored [ITa]
+            , ITppIgnored [ITppElse]
+            , ITb
+            , ITppIgnored [ITppEnd]
+            , ITb
+            ]
+
+    if res == expected
+        then return ()
+        else error $ "mismatch: expected\n " ++ show expected ++ "\ngot\n " ++ show res
