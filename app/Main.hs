@@ -319,16 +319,16 @@ addError err =
 -- From Parser.(y|hs)
 -- Emulate the parser
 
-parseModuleNoHaddock :: P Token
+parseModuleNoHaddock :: P [Token]
 parseModuleNoHaddock = happySomeParser
   where
     -- happySomeParser = happyThen (happyParse 0#) (\x -> happyReturn (let {(HappyWrap35 x') = happyOut35 x} in x'))
     happySomeParser = (>>=) (happyParse 0) (\x -> return x)
 
-happyParse :: Int -> P Token
-happyParse start_state = happyNewToken start_state notHappyAtAll notHappyAtAll
+happyParse :: Int -> P [Token]
+happyParse start_state = happyNewToken start_state [] []
 
-happyNewToken :: p1 -> p2 -> p3 -> P Token
+happyNewToken :: Int -> [Int] -> [Token] -> P [Token]
 happyNewToken action sts stk =
     -- lexer
     ppLexerDbg
@@ -348,7 +348,7 @@ happyNewToken action sts stk =
                     -- _ -> happyError' (tk, [])
         )
 
-happyDoAction :: Int -> Token -> p2 -> p3 -> p4 -> P Token
+happyDoAction :: Int -> Token -> Int -> [Int] -> [Token] -> P [Token]
 -- happyDoAction num tk action sts stk = P $ \s -> POk s tk
 happyDoAction num tk action sts stk =
     case num of
@@ -364,18 +364,21 @@ happyDoAction num tk action sts stk =
 -- happyAccept j tk st sts (HappyStk ans _) =
 --         (happyTcHack j (happyTcHack st)) (happyReturn1 ans)
 
-happyAccept :: Int -> Token -> p2 -> p3 -> p4 -> P Token
-happyAccept _j tk _st _sts _ =
+happyAccept :: Int -> Token -> Int -> [Int] -> [Token] -> P [Token]
+happyAccept _j tk _st _sts stk =
     trace ("happyAccept:" ++ show tk)
-        $ return tk
+        $ return stk
 
 -- happyReturn1 :: a -> P a
 -- happyReturn1 = return
 
-happyShift :: Int -> Int -> Token -> p2 -> p3 -> p4 -> P Token
-happyShift new_state _i tk _st sts stk = do
+happyShift :: Int -> Int -> Token -> Int -> [Int] -> [Token] -> P [Token]
+happyShift new_state _i tk st sts stk = do
     stash tk
-    happyNewToken new_state sts stk
+    happyNewToken new_state (st:sts) (tk:stk)
+-- happyShift new_state i tk st sts stk =
+--      happyNewToken new_state (HappyCons (st) (sts)) ((happyInTok (tk))`HappyStk`stk)
+
 
 stash :: Token -> P ()
 stash tk = P $ \s -> POk (s{output = tk : output s}) ()
@@ -407,7 +410,8 @@ testWithFeed feed =
     case unP parseModuleNoHaddock (initParserStateFeed feed) of
         PFailed pst -> error $ "PFailed: " ++ show pst
         -- POk pst out -> putStrLn $ "POk: " ++ show (pst, out)
-        POk pst _out -> return (reverse $ output pst)
+        -- POk pst _out -> return (reverse $ output pst)
+        POk _pst out -> return (reverse out)
 
 t1 :: IO ()
 t1 = do
