@@ -38,7 +38,9 @@ executable ghc-cpp-play
     main-is:          Main.hs
 
     -- Modules included in this executable, other than Main.
-    -- other-modules:
+    other-modules:    Lexer
+                    , Parser
+                    , PreProcess
 
     build-depends:    base ^>=4.17.2.0
                     , containers
